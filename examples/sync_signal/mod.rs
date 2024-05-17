@@ -20,6 +20,11 @@ use std::rc::Rc;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+use std::vec;
+use tracing::info;
+
+pub mod web_server;
+pub mod signaling_controller;
 
 // Handle a web request.
 pub fn web_request(
@@ -27,7 +32,7 @@ pub fn web_request(
     media_port_thread_map: Arc<HashMap<u16, SyncSender<SignalingMessage>>>,
 ) -> Response {
     if request.method() == "GET" {
-        return Response::html(include_str!("../chat.html"));
+        return Response::html(include_str!("chat.html"));
     }
 
     // "/offer/433774451/456773342" or "/leave/433774451/456773342"
@@ -35,6 +40,8 @@ pub fn web_request(
     if path.len() != 4 || path[2].parse::<u64>().is_err() || path[3].parse::<u64>().is_err() {
         return Response::empty_400();
     }
+
+    info!("received {:?}", path);
 
     let session_id = path[2].parse::<u64>().unwrap();
     let mut sorted_ports: Vec<u16> = media_port_thread_map.keys().map(|x| *x).collect();
@@ -68,14 +75,24 @@ pub fn web_request(
             .expect("to send SignalingMessage instance");
 
             let response = response_rx.recv().expect("receive answer offer");
-            match response {
+            let to_send = match response {
                 SignalingProtocolMessage::Answer {
                     session_id: _,
                     endpoint_id: _,
                     answer_sdp,
-                } => Response::from_data("application/json", answer_sdp),
+                } => {
+                    let vec_res = answer_sdp.to_vec();
+                    let res = match std::str::from_utf8(&vec_res) {
+                        Ok(v) => v,
+                        Err(e) => panic!("Invalid UTF-8 sequence : {}", e)
+                    };
+
+                    info!("sdp answer: {:?}", res);
+                    Response::from_data("application/json", res)
+                }
                 _ => Response::empty_404(),
-            }
+            };
+            to_send.with_additional_header("Access-Control-Allow-Origin", "*")
         } else {
             // leave
             Response {
@@ -105,7 +122,7 @@ pub fn sync_run(
         meter_provider.meter(format!("{}", socket.local_addr()?)),
     )?));
 
-    println!("listening {}...", socket.local_addr()?);
+    info!("listening {}...", socket.local_addr()?);
 
     let pipeline = build_pipeline(socket.local_addr()?, server_states.clone());
 

@@ -183,7 +183,7 @@ Status: <span id="ice_status">Waiting</span>
         };
         const offer = await rtc.createOffer();
         rtc.setLocalDescription(offer);
-        console.log('POST offer', offer.sdp.split('\r\n'));
+        console.log('POST offer', JSON.stringify(offer.sdp));
 
         const res = await fetch(path, {
             method: 'POST',

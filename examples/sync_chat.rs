@@ -8,7 +8,6 @@ use opentelemetry_stdout::MetricsExporterBuilder;
 use rouille::Server;
 use sfu::{RTCCertificate, ServerConfig};
 use std::collections::HashMap;
-use std::io::Write;
 use std::net::{IpAddr, UdpSocket};
 use std::str::FromStr;
 use std::sync::mpsc::{self};
@@ -55,7 +54,7 @@ struct Cli {
     signal_port: u16,
     #[arg(long, default_value_t = 3478)]
     media_port_min: u16,
-    #[arg(long, default_value_t = 3495)]
+    #[arg(long, default_value_t = 3479)]
     media_port_max: u16,
 
     #[arg(short, long)]
@@ -107,24 +106,26 @@ fn init_meter_provider(
     meter_provider
 }
 
-fn main() -> anyhow::Result<()> {
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    if cli.debug {
-        env_logger::Builder::new()
-            .format(|buf, record| {
-                writeln!(
-                    buf,
-                    "{}:{} [{}] {} - {}",
-                    record.file().unwrap_or("unknown"),
-                    record.line().unwrap_or(0),
-                    record.level(),
-                    chrono::Local::now().format("%H:%M:%S.%6f"),
-                    record.args()
-                )
-            })
-            .filter(None, cli.level.into())
-            .init();
-    }
+    // if cli.debug {
+    //     env_logger::Builder::new()
+    //         .format(|buf, record| {
+    //             writeln!(
+    //                 buf,
+    //                 "{}:{} [{}] {} - {}",
+    //                 record.file().unwrap_or("unknown"),
+    //                 record.line().unwrap_or(0),
+    //                 record.level(),
+    //                 chrono::Local::now().format("%H:%M:%S.%6f"),
+    //                 record.args()
+    //             )
+    //         })
+    //         .filter(None, cli.level.into())
+    //         .init();
+    // }
 
     let certificate = include_bytes!("util/cer.pem").to_vec();
     let private_key = include_bytes!("util/key.pem").to_vec();
@@ -133,15 +134,18 @@ fn main() -> anyhow::Result<()> {
     let host_addr = if cli.host == "127.0.0.1" && !cli.force_local_loop {
         util::select_host_address()
     } else {
-        IpAddr::from_str(&cli.host)?
+        IpAddr::from_str(&cli.host).map_err(|_| std::io::ErrorKind::InvalidInput)?
     };
 
     let media_ports: Vec<u16> = (cli.media_port_min..=cli.media_port_max).collect();
     let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
     let mut media_port_thread_map = HashMap::new();
 
-    let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-    let certificates = vec![RTCCertificate::from_key_pair(key_pair)?];
+    let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|_| std::io::ErrorKind::InvalidInput)?; // rcgen::PKCS_ECDSA_P256_SHA256
+    let certificates =
+        vec![RTCCertificate::from_key_pair(key_pair)
+            .map_err(|_| std::io::ErrorKind::InvalidInput)?];
     let dtls_handshake_config = Arc::new(
         dtls::config::ConfigBuilder::default()
             .with_certificates(
@@ -152,7 +156,8 @@ fn main() -> anyhow::Result<()> {
             )
             .with_srtp_protection_profiles(vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80])
             .with_extended_master_secret(dtls::config::ExtendedMasterSecretType::Require)
-            .build(false, None)?,
+            .build(false, None)
+            .map_err(|_| std::io::ErrorKind::InvalidInput)?,
     );
     let sctp_endpoint_config = Arc::new(sctp::EndpointConfig::default());
     let sctp_server_config = Arc::new(sctp::ServerConfig::default());
@@ -190,35 +195,43 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    let media_port_thread_map = Arc::new(media_port_thread_map);
+    // let media_port_thread_map = Arc::new(media_port_thread_map);
     let signal_port = cli.signal_port;
-    let (signal_handle, signal_cancel_tx) = if cli.force_local_loop {
-        // for integration test, no ssl
-        let signal_server = Server::new(format!("{}:{}", host_addr, signal_port), move |request| {
-            web_request(request, media_port_thread_map.clone())
-        })
-        .expect("starting the signal server");
 
-        let port = signal_server.server_addr().port();
-        println!("Connect a browser to https://{}:{}", host_addr, port);
+    web_server::start(
+        &host_addr.to_string(),
+        &signal_port.to_string(),
+        media_port_thread_map.clone(),
+    )
+    .await?;
 
-        signal_server.stoppable()
-    } else {
-        let signal_server = Server::new_ssl(
-            format!("{}:{}", host_addr, signal_port),
-            move |request| web_request(request, media_port_thread_map.clone()),
-            certificate,
-            private_key,
-        )
-        .expect("starting the signal server");
+    // let (signal_handle, signal_cancel_tx) = if cli.force_local_loop {
+    //     // for integration test, no ssl
+    //     let signal_server = Server::new(format!("{}:{}", host_addr, signal_port), move |request| {
+    //         web_request(request, media_port_thread_map.clone())
+    //     })
+    //     .expect("starting the signal server");
 
-        let port = signal_server.server_addr().port();
-        println!("Connect a browser to https://{}:{}", host_addr, port);
+    //     let port = signal_server.server_addr().port();
+    //     info!("Connect a browser to https://{}:{}", host_addr, port);
 
-        signal_server.stoppable()
-    };
+    //     signal_server.stoppable()
+    // } else {
+    //     let signal_server = Server::new_ssl(
+    //         format!("{}:{}", host_addr, signal_port),
+    //         move |request| web_request(request, media_port_thread_map.clone()),
+    //         certificate,
+    //         private_key,
+    //     )
+    //     .expect("starting the signal server");
 
-    println!("Press Ctrl-C to stop");
+    //     let port = signal_server.server_addr().port();
+    //     info!("Connect a browser to https://{}:{}", host_addr, port);
+
+    //     signal_server.stoppable()
+    // };
+
+    info!("Press Ctrl-C to stop");
     std::thread::spawn(move || {
         let mut stop_tx = Some(stop_tx);
         let mut stop_meter_tx = Some(stop_meter_tx);
@@ -233,11 +246,10 @@ fn main() -> anyhow::Result<()> {
         .expect("Error setting Ctrl-C handler");
     });
     let _ = stop_rx.recv();
-    println!("Wait for Signaling Sever and Media Server Gracefully Shutdown...");
+    info!("Wait for Signaling Sever and Media Server Gracefully Shutdown...");
     wait_group.wait();
-    let _ = signal_cancel_tx.send(());
-    println!("signaling server is gracefully down");
-    let _ = signal_handle.join();
+    // let _ = signal_cancel_tx.send(());
+    // let _ = signal_handle.join();
 
     Ok(())
 }
