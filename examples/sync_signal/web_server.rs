@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::mpsc::SyncSender};
 
+use actix_cors::Cors;
 use actix_web::{web::Data, App, HttpServer};
 use stun::addr;
 use tracing::info;
@@ -15,7 +16,14 @@ pub async fn start(addr: &str, port: &str, media_port_thread_map: HashMap<u16, S
 
     info!("Starting web server at {}", addr);
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
+
         App::new()
+            .wrap(cors)
             .app_data(Data::new(media_port_thread_map.clone()))
             .service(handle_offer)
             .service(index)
